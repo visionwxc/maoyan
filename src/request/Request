@@ -1,0 +1,238 @@
+from typing import Any, Union, Tuple
+
+import requests
+from urllib import request
+import json
+import pyecharts
+from datetime import datetime
+from datetime import timedelta
+import pandas
+import numpy
+import itertools
+from collections import Counter
+import pymongo
+import codecs
+import csv
+import pymysql.cursors
+import time
+
+config = {
+    'host': '',
+    'port': 3306,
+    'user': 'root',
+    'passwd': '',
+    'charset': 'utf8mb4',
+    'cursorclass': pymysql.cursors.DictCursor
+}
+
+
+# 请求url数据
+def getMoveInfo(url):
+    # session = requests.Session()
+    # headers = {
+    #     'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36'
+    # }
+    # response = session.get(url)
+    req = request.Request(url)
+    response = request.urlopen(req)
+    if response.getcode() == 200:
+        return response.read()
+    return None
+
+
+# 获取想要的数据
+def parseInfo(data):
+    info = json.loads(data)['cmts']  # 转string为json
+    comments = []
+    for item in info:
+        # saveData(item['nickName'], item['content'], item['score'], item['cityName'], item['startTime'])
+        comment = {
+            'id': item['id'],
+            'date': item['startTime'],
+            'nickName': item['nickName'],
+            'city': item['cityName'] if 'cityName' in item else '',  # 处理city为空的情况
+            'rate': item['score'],
+            'comment': item['content'].replace('\n', ' ', 10)  # 处理评论过长换行
+        }
+        comments.append(comment)
+    return comments
+
+
+# 存储数据到txt文件中
+def saveToTxt():
+    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # 获取当前的时间，从当前的时间向前获取
+    end_time = '2018-08-10 00:00:00'
+    while start_time > end_time:
+        url = 'http://m.maoyan.com/mmdb/comments/movie/1203084.json?_v_=yes&offset=0&startTime=' + start_time.replace(' ', '%20')
+        html = None
+        '''
+        如果过于频繁的请求，服务器会拒绝连接，服务器的反爬虫策略
+        解决方法：每次请求完之后增加延时0.1秒，如果被拒绝则0.5秒后重试
+        '''
+        try:
+            html = getMoveInfo(url)
+        except Exception as e:
+            time.sleep(0.5)
+            html = getMoveInfo(url)
+        else:
+            time.sleep(0.1)
+        comments = parseInfo(html)
+        print(comments)
+        start_time = comments[14]['date'] #获取末尾评论时间
+        start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S') + timedelta(seconds=-1) #转换为datetime类型，减一秒，避免抓取重复数据
+        start_time = datetime.strftime(start_time, '%Y-%m-%d %H:%M:%S') #转换为str
+        for item in comments:
+            with open(r'C:\Users\xwu\Desktop\comments.txt', 'a', encoding='utf-8') as f: #打开一个文件类型 在文件路劲上加上r是相对路径的意思
+                f.write(str(item['id'])+','+item['nickName'] + ',' + item['city'] + ','+ item['comment'] + ',' + str(item['rate']) + ',' + item['date'] + '\n')
+
+# 保存数据到mongodb
+def saveToMongodb():
+    client = pymongo.MongoClient('mongodb://localhost:30008') #连接mongodb
+    db = client.maoyan #指定数据库
+    collection = db.comments # 指定集合
+    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # 获取当前的时间，从当前的时间向前获取
+    end_time = '2018-08-10 00:00:00'
+    while start_time > end_time:
+        url = 'http://m.maoyan.com/mmdb/comments/movie/1200486.json?_v_=yes&offset=0&startTime=' + start_time.replace(
+            ' ', '%20')
+        html = None
+        '''
+        如果过于频繁的请求，服务器会拒绝连接，服务器的反爬虫策略
+        解决方法：每次请求完之后增加延时0.1秒，如果被拒绝则0.5秒后重试
+        '''
+        try:
+            html = getMoveInfo(url)
+        except Exception as e:
+            time.sleep(0.5)
+            html = getMoveInfo(url)
+        else:
+            time.sleep(0.1)
+        comments = parseInfo(html)
+        print(comments)
+        start_time = comments[14]['date']  # 获取末尾评论时间
+        start_time = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S') + timedelta(
+            seconds=-1)  # 转换为datetime类型，减一秒，避免抓取重复数据
+        start_time = datetime.strftime(start_time, '%Y-%m-%d %H:%M:%S')  # 转换为str
+        result = collection.insert_many(comments)
+        print(result)
+
+# 无名之辈粉丝分布图
+def render():
+    citys = []
+    client = pymongo.MongoClient('mongodb://localhost:30008')  # 连接mongodb
+    db = client.maoyan  # 指定数据库
+    collection = db.comments  # 指定集合
+    arry = collection.find()
+    for item in arry:
+        city = item['city']
+        if city != '':
+            citys.append(city)
+    data = []
+    for city in set(citys):
+        data.append((city, citys.count(city)))
+    geo = pyecharts.Geo('《无名之辈》粉丝位置分布', '数据来源：猫眼', title_color='#fff', title_pos='center', width=1200, height=600, background_color='#404a59')
+    attr, value = geo.cast(data)
+    geo.add('', attr, value, visual_range=[0, 3500],
+            visual_text_color='#fff', symbol_size=15,
+            is_visualmap=True, is_piecewise=True, visual_split_number=10)
+    geo.render('粉丝位置分布-地理坐标图.html')
+    data_top20 = Counter(citys).most_common(20)  # 返回出现次数最多的20条
+    bar = pyecharts.Bar('《一出好戏》粉丝来源排行TOP20', '数据来源：猫眼', title_pos='center', width=1200, height=600)
+    attr, value = bar.cast(data_top20)
+    bar.add('', attr, value, is_visualmap=True, visual_range=[0, 3500], visual_text_color='#fff', is_more_utils=True,
+            is_label_show=True)
+    bar.render('粉丝来源排行-柱状图.html')
+
+
+# 保存数据到数据库
+def saveData(nikeName, comment, rate, city, start_time):
+    connect = pymysql.connect(**config)
+    connect.autocommit(1)
+    connect.select_db('maoyan')
+    cursor = connect.cursor()
+    sql = "INSERT INTO `comment`(nikeName,comment,rate,city,startTime)  VALUES(%s,%s,%s,%s,%s)"
+    v = (nikeName, comment, rate, city, start_time)
+    cursor.execute(sql, v)
+    cursor.close()
+    connect.close()
+
+
+# 使用pyecharts生成地图
+def generateMap():
+    # ipl_data = {'Team': ['Riders', 'Riders', 'Devils', 'Devils', 'Kings',
+    #                      'kings', 'Kings', 'Kings', 'Riders', 'Royals', 'Royals', 'Riders'],
+    #             'Rank': [1, 2, 2, 3, 3, 4, 1, 1, 2, 4, 1, 2],
+    #             'Year': [2014, 2015, 2014, 2015, 2014, 2015, 2016, 2017, 2016, 2014, 2015, 2017],
+    #             'Points': [876, 789, 863, 673, 741, 812, 756, 788, 694, 701, 804, 690]}
+    # df = pandas.DataFrame(ipl_data)
+    # grouped = df.groupby('Year')
+    # print(grouped['Points'].agg(numpy.mean))
+    # data = pandas.read_csv('C:\\Users\\xwu\\Desktop\\comment.csv', sep='{', header=None, encoding='utf-8',
+    #                        names=['date', 'nickName', 'city', 'rate', 'comment'])
+    data = getMoveInfo('http://m.maoyan.com/mmdb/comments/movie/1200486.json?v=yes&offset=15')
+    info = parseInfo(data)
+    city_arr = []
+    city_rate_arr = []
+    for item in info:
+        city_data = (item['cityName'], item['score'])
+        city_arr.append(item['cityName'])
+        city_rate_arr.append(city_data)
+    city_set = set(city_arr)
+    city_count_arr = []
+    for city in city_set:
+        city_count_arr.append((city, city_arr.count(city)))
+
+    # df = pandas.DataFrame(data)
+    # city = df.groupby(['city'])
+    # city_com = city['rate'].agg['mean', 'count']
+    # city_com.reset_index(inplace=True)
+    # data_map = [(city_com['city'][i], city_com['count'][i]) for i in range(0, city_com.shape[0])]
+    geo = pyecharts.Geo("GEO地理位置分析", title_pos="center", width=1200, height=800)
+    while True:
+        try:
+            attr, val = geo.cast(city_count_arr)
+            geo.add("", attr, val, visual_range=[0, 300], visual_text_color="#fff", symbol_size=10, is_visualmap=True,
+                    maptype='china')
+        except ValueError as e:
+            e = e.message.spilt("No corrdinate is specified for")[1]
+            city_count_arr = filter(lambda item: item[0] != e, city_count_arr)
+        else:
+            break
+    geo.render('geo_city_location.html')
+
+
+
+# 导出mysql数据到csv文件
+def readMysqlToCsv(fileName):
+    with codecs.open(filename=fileName, mode='w', encoding='utf-8') as f:
+        write = csv.writer(f, dialect='excel')
+        # write.writerow(['moveId', 'nikeName', 'comment', 'rate', 'city', 'startTime'])
+        db = pymysql.connect(**config)
+        db.autocommit(1)
+        db.select_db('maoyan')
+        cursor = db.cursor()
+        sql = 'select * from comment'
+        cursor.execute(sql)
+        dbData: Union[Tuple, Any] = cursor.fetchall()
+        # for item in dbData:
+        #     print(item)
+        #     write.writerow(item)
+        return dbData
+
+
+if __name__ == '__main__':
+    # data = getMoveInfo('http://m.maoyan.com/mmdb/comments/movie/1200486.json?_v_=yes&offset=0&startTime=2018-07-28%2022%3A25%3A03')
+    # comments = parseInfo(data)
+    # print(comments)
+    # print(data)
+    # data = readMysqlToCsv('C:\\Users\\xwu\\Desktop\\comment.csv')
+    # generateMap()
+    # generateChinaMap()
+    # i = 10
+    # while i <= 20:
+    #     time = datetime.now().strftime('%Y-%m-%d %H:%M:%S').replace('', '%20')
+    #     print(time)
+    #     i = i + 1
+    # saveToTxt()
+    # saveToMongodb()
+    render()
